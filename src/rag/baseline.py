@@ -243,7 +243,7 @@ class LocalQwenGenerator:
         self.device = _resolve_device(config.device)
         self.tokenizer = AutoTokenizer.from_pretrained(config.generation_model_name)
         dtype = torch.float16 if self.device == "cuda" else torch.float32
-        model_kwargs = {"torch_dtype": dtype, "low_cpu_mem_usage": True}
+        model_kwargs = {"dtype": dtype, "low_cpu_mem_usage": True}
         if self.device == "cuda":
             model_kwargs["device_map"] = "auto"
         self.model = AutoModelForCausalLM.from_pretrained(config.generation_model_name, **model_kwargs)
@@ -269,10 +269,14 @@ class LocalQwenGenerator:
         ]
         if getattr(self.tokenizer, "chat_template", None):
             model_inputs = self.tokenizer.apply_chat_template(
-                messages, add_generation_prompt=True, return_tensors="pt"
+                messages,
+                tokenize=True,
+                add_generation_prompt=True,
+                return_dict=True,
+                return_tensors="pt",
             )
-            input_ids = model_inputs.unsqueeze(0) if model_inputs.ndim == 1 else model_inputs
-            attention_mask = None
+            input_ids = model_inputs["input_ids"]
+            attention_mask = model_inputs["attention_mask"]
         else:
             encoded = self.tokenizer("\n\n".join(message["content"] for message in messages), return_tensors="pt")
             input_ids = encoded["input_ids"]
