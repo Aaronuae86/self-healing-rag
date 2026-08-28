@@ -10,6 +10,12 @@ from .baseline import (
     load_documents,
 )
 from .bm25 import BM25Result, BM25Retriever
+from .hybrid import (
+    HybridResult,
+    HybridRetriever,
+    RetrievalAgreement,
+    measure_retrieval_overlap,
+)
 
 __all__ = [
     "BaselineRAG",
@@ -17,8 +23,12 @@ __all__ = [
     "BM25Retriever",
     "Document",
     "FAISSRetriever",
+    "HybridResult",
+    "HybridRetriever",
     "RAGAnswer",
     "RAGConfig",
     "RetrievalResult",
+    "RetrievalAgreement",
     "load_documents",
+    "measure_retrieval_overlap",
 ]

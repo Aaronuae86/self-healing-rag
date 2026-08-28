@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Sequence
+from typing import Protocol, Sequence
 
 import numpy as np
 
@@ -42,6 +42,12 @@ class RetrievalResult:
     @property
     def text(self) -> str:
         return self.document.text
+
+
+class Retriever(Protocol):
+    """Shared interface implemented by dense and hybrid retrievers."""
+
+    def retrieve(self, query: str, top_k: int = 3) -> Sequence[RetrievalResult]: ...
 
 
 @dataclass
@@ -301,7 +307,7 @@ class LocalQwenGenerator:
 class BaselineRAG:
     """Connect explicit FAISS retrieval to a local grounded-generation model."""
 
-    def __init__(self, retriever: FAISSRetriever, generator: LocalQwenGenerator, config: RAGConfig) -> None:
+    def __init__(self, retriever: Retriever, generator: LocalQwenGenerator, config: RAGConfig) -> None:
         self.retriever = retriever
         self.generator = generator
         self.config = config
@@ -309,8 +315,10 @@ class BaselineRAG:
     def answer_question(self, question: str, top_k: int | None = None) -> RAGAnswer:
         """Retrieve context, generate a grounded answer, and retain all metadata."""
 
-        results = self.retriever.retrieve(
-            question, top_k=self.config.top_k if top_k is None else top_k
+        results = list(
+            self.retriever.retrieve(
+                question, top_k=self.config.top_k if top_k is None else top_k
+            )
         )
         answer = self.generator.generate(question, results)
         return RAGAnswer(question=question, answer=answer, retrieved_documents=results)
