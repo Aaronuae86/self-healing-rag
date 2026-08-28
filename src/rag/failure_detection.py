@@ -32,9 +32,8 @@ class FailureDetectorConfig:
     minimum_hybrid_top_rrf: float = 0.025
     minimum_cross_encoder_top: float = -2.0
     maximum_weak_cross_encoder_margin: float = 1.0
-    maximum_ambiguous_dense_margin: float = 0.06
-    minimum_plausible_dense_top2: float = 0.25
-    maximum_ambiguous_cross_encoder_margin: float = 1.0
+    maximum_ambiguous_dense_margin: float = 0.01
+    maximum_ambiguous_cross_encoder_margin: float = 1.5
     minimum_plausible_cross_encoder_top2: float = -5.0
     insufficient_dense_top1: float = 0.25
     insufficient_dense_average: float = 0.20
@@ -43,7 +42,6 @@ class FailureDetectorConfig:
     minimum_clear_cross_encoder_margin: float = 1.0
     insufficient_overlap_ratio: float = 0.20
     insufficient_hybrid_top_rrf: float = 0.025
-    minimum_ambiguous_signals: int = 2
     minimum_weak_signals: int = 3
     minimum_core_insufficient_signals: int = 2
     minimum_insufficient_signals: int = 3
@@ -121,47 +119,32 @@ class RetrievalFailureDetector:
                 tuple(insufficient_reasons),
             )
 
-        ambiguous_reasons: list[str] = []
         dense_margin = diagnostics.dense_top1_top2_margin
-        dense_top = diagnostics.dense_top1_score
-        dense_top2 = (
-            dense_top - dense_margin
-            if dense_top is not None and dense_margin is not None
-            else None
-        )
-        if (
+        dense_candidates_are_close = (
             dense_margin is not None
             and dense_margin <= config.maximum_ambiguous_dense_margin
-            and dense_top2 is not None
-            and dense_top2 >= config.minimum_plausible_dense_top2
-        ):
-            ambiguous_reasons.extend(
-                (
-                    "dense top candidates have very similar scores",
-                    "dense runner-up remains plausible",
-                )
-            )
+        )
         cross_top2 = (
             cross_top - cross_margin
             if cross_top is not None and cross_margin is not None
             else None
         )
-        if (
+        cross_candidates_are_close_and_plausible = (
             cross_margin is not None
             and cross_margin <= config.maximum_ambiguous_cross_encoder_margin
             and cross_top2 is not None
             and cross_top2 >= config.minimum_plausible_cross_encoder_top2
-        ):
-            ambiguous_reasons.extend(
-                (
-                    "cross-encoder top candidates have relatively similar scores",
-                    "cross-encoder runner-up remains plausible",
+        )
+        if dense_candidates_are_close and cross_candidates_are_close_and_plausible:
+            ambiguous_reasons = [
+                "dense top candidates have a very small score margin",
+                "cross-encoder top candidates have a relatively small score margin",
+                "cross-encoder runner-up remains plausibly relevant",
+            ]
+            if not diagnostics.same_document_ranked_highly:
+                ambiguous_reasons.append(
+                    "retrieval stages disagree on the top document"
                 )
-            )
-        if ambiguous_reasons and not diagnostics.same_document_ranked_highly:
-            ambiguous_reasons.append("retrieval stages disagree on the top document")
-
-        if len(ambiguous_reasons) >= config.minimum_ambiguous_signals:
             return FailureDetection(
                 RetrievalFailure.AMBIGUOUS,
                 tuple(ambiguous_reasons),
