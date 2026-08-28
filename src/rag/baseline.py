@@ -264,6 +264,53 @@ class LocalQwenGenerator:
             for rank, result in enumerate(results, start=1)
         )
 
+    def generate_messages(
+        self,
+        messages: Sequence[dict[str, str]],
+        max_new_tokens: int | None = None,
+    ) -> str:
+        """Generate locally from chat messages using the already-loaded Qwen model."""
+
+        if max_new_tokens is not None and max_new_tokens < 1:
+            raise ValueError("max_new_tokens must be at least 1 when provided.")
+
+        if getattr(self.tokenizer, "chat_template", None):
+            model_inputs = self.tokenizer.apply_chat_template(
+                list(messages),
+                tokenize=True,
+                add_generation_prompt=True,
+                return_dict=True,
+                return_tensors="pt",
+            )
+            input_ids = model_inputs["input_ids"]
+            attention_mask = model_inputs["attention_mask"]
+        else:
+            encoded = self.tokenizer(
+                "\n\n".join(message["content"] for message in messages),
+                return_tensors="pt",
+            )
+            input_ids = encoded["input_ids"]
+            attention_mask = encoded["attention_mask"]
+
+        input_device = self.model.get_input_embeddings().weight.device
+        input_ids = input_ids.to(input_device)
+        if attention_mask is not None:
+            attention_mask = attention_mask.to(input_device)
+        generation_kwargs = {
+            "max_new_tokens": max_new_tokens or self.config.max_new_tokens,
+            "do_sample": self.config.do_sample,
+            "pad_token_id": self.tokenizer.eos_token_id,
+        }
+        if self.config.do_sample:
+            generation_kwargs["temperature"] = self.config.temperature
+        generated = self.model.generate(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            **generation_kwargs,
+        )
+        new_tokens = generated[0, input_ids.shape[1] :]
+        return self.tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
+
     def generate(self, question: str, results: Sequence[RetrievalResult]) -> str:
         """Generate one answer grounded exclusively in the supplied retrieval results."""
 
@@ -273,35 +320,7 @@ class LocalQwenGenerator:
             {"role": "system", "content": self.SYSTEM_INSTRUCTION},
             {"role": "user", "content": user_prompt},
         ]
-        if getattr(self.tokenizer, "chat_template", None):
-            model_inputs = self.tokenizer.apply_chat_template(
-                messages,
-                tokenize=True,
-                add_generation_prompt=True,
-                return_dict=True,
-                return_tensors="pt",
-            )
-            input_ids = model_inputs["input_ids"]
-            attention_mask = model_inputs["attention_mask"]
-        else:
-            encoded = self.tokenizer("\n\n".join(message["content"] for message in messages), return_tensors="pt")
-            input_ids = encoded["input_ids"]
-            attention_mask = encoded["attention_mask"]
-
-        input_device = self.model.get_input_embeddings().weight.device
-        input_ids = input_ids.to(input_device)
-        if attention_mask is not None:
-            attention_mask = attention_mask.to(input_device)
-        generation_kwargs = {
-            "max_new_tokens": self.config.max_new_tokens,
-            "do_sample": self.config.do_sample,
-            "pad_token_id": self.tokenizer.eos_token_id,
-        }
-        if self.config.do_sample:
-            generation_kwargs["temperature"] = self.config.temperature
-        generated = self.model.generate(input_ids=input_ids, attention_mask=attention_mask, **generation_kwargs)
-        new_tokens = generated[0, input_ids.shape[1] :]
-        return self.tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
+        return self.generate_messages(messages)
 
 
 class BaselineRAG:

@@ -5,3 +5,4 @@ faiss-cpu
 accelerate
 datasets
 rank-bm25
+langgraph
