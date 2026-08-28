@@ -9,9 +9,12 @@ from .baseline import (
     RetrievalResult,
     load_documents,
 )
+from .bm25 import BM25Result, BM25Retriever
 
 __all__ = [
     "BaselineRAG",
+    "BM25Result",
+    "BM25Retriever",
     "Document",
     "FAISSRetriever",
     "RAGAnswer",
