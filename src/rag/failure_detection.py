@@ -30,15 +30,22 @@ class FailureDetectorConfig:
     minimum_bm25_top1: float = 0.25
     minimum_overlap_ratio: float = 0.20
     minimum_hybrid_top_rrf: float = 0.025
-    minimum_cross_encoder_top: float = 0.20
-    maximum_ambiguous_dense_margin: float = 0.04
-    maximum_ambiguous_cross_encoder_margin: float = 0.05
+    minimum_cross_encoder_top: float = -2.0
+    maximum_weak_cross_encoder_margin: float = 1.0
+    maximum_ambiguous_dense_margin: float = 0.06
+    minimum_plausible_dense_top2: float = 0.25
+    maximum_ambiguous_cross_encoder_margin: float = 1.0
+    minimum_plausible_cross_encoder_top2: float = -5.0
     insufficient_dense_top1: float = 0.25
+    insufficient_dense_average: float = 0.20
     insufficient_bm25_top1: float = 0.0
-    insufficient_cross_encoder_top: float = 0.05
-    insufficient_overlap_ratio: float = 0.0
+    insufficient_cross_encoder_top: float = -5.0
+    minimum_clear_cross_encoder_margin: float = 1.0
+    insufficient_overlap_ratio: float = 0.20
+    insufficient_hybrid_top_rrf: float = 0.025
     minimum_ambiguous_signals: int = 2
     minimum_weak_signals: int = 3
+    minimum_core_insufficient_signals: int = 2
     minimum_insufficient_signals: int = 3
 
 
@@ -69,21 +76,46 @@ class RetrievalFailureDetector:
 
         config = self.config
         insufficient_reasons: list[str] = []
+        core_insufficient_signals = 0
         if _below(diagnostics.dense_top1_score, config.insufficient_dense_top1):
             insufficient_reasons.append("very low dense top-1 score")
+            core_insufficient_signals += 1
+        if _below(
+            diagnostics.dense_average_top_k_score,
+            config.insufficient_dense_average,
+        ):
+            insufficient_reasons.append("very low average dense relevance")
+            core_insufficient_signals += 1
         if _at_or_below(diagnostics.bm25_top1_score, config.insufficient_bm25_top1):
             insufficient_reasons.append("no meaningful BM25 match")
+        cross_top = diagnostics.cross_encoder_top_score
+        cross_margin = diagnostics.cross_encoder_top1_top2_margin
+        cross_score_is_extremely_poor = _below(
+            cross_top, config.insufficient_cross_encoder_top
+        )
+        cross_result_is_not_clearly_separated = (
+            cross_margin is None
+            or cross_margin < config.minimum_clear_cross_encoder_margin
+        )
+        if cross_score_is_extremely_poor and cross_result_is_not_clearly_separated:
+            insufficient_reasons.append(
+                "extremely poor cross-encoder relevance without a clear winner"
+            )
+            core_insufficient_signals += 1
+        if diagnostics.dense_bm25_overlap_ratio < config.insufficient_overlap_ratio:
+            insufficient_reasons.append("weak dense/BM25 overlap")
         if _below(
-            diagnostics.cross_encoder_top_score,
-            config.insufficient_cross_encoder_top,
+            diagnostics.hybrid_top_rrf_score,
+            config.insufficient_hybrid_top_rrf,
         ):
-            insufficient_reasons.append("very low cross-encoder top score")
-        if diagnostics.dense_bm25_overlap_ratio <= config.insufficient_overlap_ratio:
-            insufficient_reasons.append("no dense/BM25 overlap")
+            insufficient_reasons.append("weak hybrid retrieval consensus")
         if not diagnostics.same_document_ranked_highly:
             insufficient_reasons.append("no top-document agreement")
 
-        if len(insufficient_reasons) >= config.minimum_insufficient_signals:
+        if (
+            core_insufficient_signals >= config.minimum_core_insufficient_signals
+            and len(insufficient_reasons) >= config.minimum_insufficient_signals
+        ):
             return FailureDetection(
                 RetrievalFailure.INSUFFICIENT_EVIDENCE,
                 tuple(insufficient_reasons),
@@ -91,15 +123,42 @@ class RetrievalFailureDetector:
 
         ambiguous_reasons: list[str] = []
         dense_margin = diagnostics.dense_top1_top2_margin
-        if dense_margin is not None and dense_margin <= config.maximum_ambiguous_dense_margin:
-            ambiguous_reasons.append("dense top candidates have similar scores")
-        cross_margin = diagnostics.cross_encoder_top1_top2_margin
+        dense_top = diagnostics.dense_top1_score
+        dense_top2 = (
+            dense_top - dense_margin
+            if dense_top is not None and dense_margin is not None
+            else None
+        )
+        if (
+            dense_margin is not None
+            and dense_margin <= config.maximum_ambiguous_dense_margin
+            and dense_top2 is not None
+            and dense_top2 >= config.minimum_plausible_dense_top2
+        ):
+            ambiguous_reasons.extend(
+                (
+                    "dense top candidates have very similar scores",
+                    "dense runner-up remains plausible",
+                )
+            )
+        cross_top2 = (
+            cross_top - cross_margin
+            if cross_top is not None and cross_margin is not None
+            else None
+        )
         if (
             cross_margin is not None
             and cross_margin <= config.maximum_ambiguous_cross_encoder_margin
+            and cross_top2 is not None
+            and cross_top2 >= config.minimum_plausible_cross_encoder_top2
         ):
-            ambiguous_reasons.append("cross-encoder top candidates have similar scores")
-        if not diagnostics.same_document_ranked_highly:
+            ambiguous_reasons.extend(
+                (
+                    "cross-encoder top candidates have relatively similar scores",
+                    "cross-encoder runner-up remains plausible",
+                )
+            )
+        if ambiguous_reasons and not diagnostics.same_document_ranked_highly:
             ambiguous_reasons.append("retrieval stages disagree on the top document")
 
         if len(ambiguous_reasons) >= config.minimum_ambiguous_signals:
@@ -119,11 +178,16 @@ class RetrievalFailureDetector:
             weak_reasons.append("dense/BM25 overlap is weak")
         if _below(diagnostics.hybrid_top_rrf_score, config.minimum_hybrid_top_rrf):
             weak_reasons.append("hybrid RRF consensus is weak")
-        if _below(
-            diagnostics.cross_encoder_top_score,
-            config.minimum_cross_encoder_top,
+        if (
+            _below(diagnostics.cross_encoder_top_score, config.minimum_cross_encoder_top)
+            and (
+                cross_margin is None
+                or cross_margin <= config.maximum_weak_cross_encoder_margin
+            )
         ):
-            weak_reasons.append("cross-encoder top score is weak")
+            weak_reasons.append(
+                "cross-encoder score is weak and lacks clear separation"
+            )
         if not diagnostics.same_document_ranked_highly:
             weak_reasons.append("no top-document agreement")
 
