@@ -10,6 +10,7 @@ from .baseline import (
     load_documents,
 )
 from .bm25 import BM25Result, BM25Retriever
+from .diagnostics import RetrievalDiagnostics, compute_retrieval_diagnostics
 from .hybrid import (
     HybridResult,
     HybridRetriever,
@@ -31,7 +32,9 @@ __all__ = [
     "RAGConfig",
     "RetrievalResult",
     "RetrievalAgreement",
+    "RetrievalDiagnostics",
     "RerankedResult",
+    "compute_retrieval_diagnostics",
     "load_documents",
     "measure_retrieval_overlap",
 ]
