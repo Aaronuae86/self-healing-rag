@@ -16,11 +16,13 @@ from .hybrid import (
     RetrievalAgreement,
     measure_retrieval_overlap,
 )
+from .reranker import CrossEncoderReranker, RerankedResult
 
 __all__ = [
     "BaselineRAG",
     "BM25Result",
     "BM25Retriever",
+    "CrossEncoderReranker",
     "Document",
     "FAISSRetriever",
     "HybridResult",
@@ -29,6 +31,7 @@ __all__ = [
     "RAGConfig",
     "RetrievalResult",
     "RetrievalAgreement",
+    "RerankedResult",
     "load_documents",
     "measure_retrieval_overlap",
 ]
