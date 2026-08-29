@@ -1,0 +1,227 @@
+[
+  {
+    "id": "eval-001",
+    "category": "healthy_supported",
+    "query": "Where is the Mona Lisa displayed?",
+    "expected_failure_type": "HEALTHY",
+    "expected_relevant_document_ids": ["doc-08"],
+    "should_answer": true,
+    "expected_answer_keywords": ["Louvre", "Paris"]
+  },
+  {
+    "id": "eval-002",
+    "category": "healthy_supported",
+    "query": "How many chambers does the human heart have?",
+    "expected_failure_type": "HEALTHY",
+    "expected_relevant_document_ids": ["doc-09"],
+    "should_answer": true,
+    "expected_answer_keywords": ["four", "chambers"]
+  },
+  {
+    "id": "eval-003",
+    "category": "healthy_supported",
+    "query": "Where is the Great Barrier Reef located?",
+    "expected_failure_type": "HEALTHY",
+    "expected_relevant_document_ids": ["doc-03"],
+    "should_answer": true,
+    "expected_answer_keywords": ["Coral Sea", "Queensland"]
+  },
+  {
+    "id": "eval-004",
+    "category": "healthy_supported",
+    "query": "Which planet is smallest and closest to the Sun?",
+    "expected_failure_type": "HEALTHY",
+    "expected_relevant_document_ids": ["doc-01"],
+    "should_answer": true,
+    "expected_answer_keywords": ["Mercury"]
+  },
+  {
+    "id": "eval-005",
+    "category": "healthy_supported",
+    "query": "When was the Statue of Liberty dedicated and which country gave it to the United States?",
+    "expected_failure_type": "HEALTHY",
+    "expected_relevant_document_ids": ["doc-25"],
+    "should_answer": true,
+    "expected_answer_keywords": ["France", "1886"]
+  },
+  {
+    "id": "eval-006",
+    "category": "paraphrased",
+    "query": "Which orbiting observatory takes its name from an astronomer?",
+    "expected_failure_type": "HEALTHY",
+    "expected_relevant_document_ids": ["doc-07"],
+    "should_answer": true,
+    "expected_answer_keywords": ["Hubble", "Edwin Hubble"]
+  },
+  {
+    "id": "eval-007",
+    "category": "paraphrased",
+    "query": "What process lets light-powered organisms manufacture sugar and release a gas?",
+    "expected_failure_type": "HEALTHY",
+    "expected_relevant_document_ids": ["doc-02"],
+    "should_answer": true,
+    "expected_answer_keywords": ["photosynthesis", "oxygen"]
+  },
+  {
+    "id": "eval-008",
+    "category": "paraphrased",
+    "query": "What abstract computing device reads and changes symbols on an unlimited strip?",
+    "expected_failure_type": "HEALTHY",
+    "expected_relevant_document_ids": ["doc-21"],
+    "should_answer": true,
+    "expected_answer_keywords": ["Turing machine", "tape"]
+  },
+  {
+    "id": "eval-009",
+    "category": "paraphrased",
+    "query": "What prepares the body's defenses to recognize a disease-causing target?",
+    "expected_failure_type": "HEALTHY",
+    "expected_relevant_document_ids": ["doc-20"],
+    "should_answer": true,
+    "expected_answer_keywords": ["vaccines", "immune system"]
+  },
+  {
+    "id": "eval-010",
+    "category": "paraphrased",
+    "query": "What event temporarily hides sunlight when our natural satellite moves in front of the Sun?",
+    "expected_failure_type": "HEALTHY",
+    "expected_relevant_document_ids": ["doc-24"],
+    "should_answer": true,
+    "expected_answer_keywords": ["solar eclipse", "Moon"]
+  },
+  {
+    "id": "eval-011",
+    "category": "ambiguous",
+    "query": "What happened in 1991?",
+    "expected_failure_type": "AMBIGUOUS",
+    "expected_relevant_document_ids": ["doc-05", "doc-22"],
+    "should_answer": true,
+    "expected_answer_keywords": ["1991"]
+  },
+  {
+    "id": "eval-012",
+    "category": "ambiguous",
+    "query": "Which subjects in the corpus are connected to France?",
+    "expected_failure_type": "AMBIGUOUS",
+    "expected_relevant_document_ids": ["doc-08", "doc-14", "doc-25"],
+    "should_answer": true,
+    "expected_answer_keywords": ["France"]
+  },
+  {
+    "id": "eval-013",
+    "category": "ambiguous",
+    "query": "What in the collection concerns networks?",
+    "expected_failure_type": "AMBIGUOUS",
+    "expected_relevant_document_ids": ["doc-11", "doc-17", "doc-22"],
+    "should_answer": true,
+    "expected_answer_keywords": ["network"]
+  },
+  {
+    "id": "eval-014",
+    "category": "ambiguous",
+    "query": "Which entries describe interactions involving the Moon and Earth?",
+    "expected_failure_type": "AMBIGUOUS",
+    "expected_relevant_document_ids": ["doc-13", "doc-24"],
+    "should_answer": true,
+    "expected_answer_keywords": ["Moon", "Earth"]
+  },
+  {
+    "id": "eval-015",
+    "category": "ambiguous",
+    "query": "Which entry discusses a pioneering scientist or inventor?",
+    "expected_failure_type": "AMBIGUOUS",
+    "expected_relevant_document_ids": ["doc-04", "doc-21", "doc-22"],
+    "should_answer": true,
+    "expected_answer_keywords": []
+  },
+  {
+    "id": "eval-016",
+    "category": "weak_retrieval",
+    "query": "What does the double-helix information carrier do inside living things?",
+    "expected_failure_type": "WEAK_RETRIEVAL",
+    "expected_relevant_document_ids": ["doc-12"],
+    "should_answer": true,
+    "expected_answer_keywords": ["DNA", "genetic instructions"]
+  },
+  {
+    "id": "eval-017",
+    "category": "weak_retrieval",
+    "query": "Name the vast scorching landscape in the northern part of the African continent.",
+    "expected_failure_type": "WEAK_RETRIEVAL",
+    "expected_relevant_document_ids": ["doc-18"],
+    "should_answer": true,
+    "expected_answer_keywords": ["Sahara", "North Africa"]
+  },
+  {
+    "id": "eval-018",
+    "category": "weak_retrieval",
+    "query": "Which flowing feature dominates its continent's watershed before reaching an ocean?",
+    "expected_failure_type": "WEAK_RETRIEVAL",
+    "expected_relevant_document_ids": ["doc-06"],
+    "should_answer": true,
+    "expected_answer_keywords": ["Amazon River", "Atlantic Ocean"]
+  },
+  {
+    "id": "eval-019",
+    "category": "weak_retrieval",
+    "query": "Who is associated with two science honors and research into invisible emissions?",
+    "expected_failure_type": "WEAK_RETRIEVAL",
+    "expected_relevant_document_ids": ["doc-04"],
+    "should_answer": true,
+    "expected_answer_keywords": ["Marie Curie", "radioactivity"]
+  },
+  {
+    "id": "eval-020",
+    "category": "weak_retrieval",
+    "query": "Which classical finale turns a poem about joy into sung music?",
+    "expected_failure_type": "WEAK_RETRIEVAL",
+    "expected_relevant_document_ids": ["doc-19"],
+    "should_answer": true,
+    "expected_answer_keywords": ["Beethoven", "Ode to Joy"]
+  },
+  {
+    "id": "eval-021",
+    "category": "missing_evidence",
+    "query": "What is the capital of Canada?",
+    "expected_failure_type": "INSUFFICIENT_EVIDENCE",
+    "expected_relevant_document_ids": [],
+    "should_answer": false,
+    "expected_answer_keywords": []
+  },
+  {
+    "id": "eval-022",
+    "category": "missing_evidence",
+    "query": "What is the tallest building in the world?",
+    "expected_failure_type": "INSUFFICIENT_EVIDENCE",
+    "expected_relevant_document_ids": [],
+    "should_answer": false,
+    "expected_answer_keywords": []
+  },
+  {
+    "id": "eval-023",
+    "category": "missing_evidence",
+    "query": "Who wrote the novel 1984?",
+    "expected_failure_type": "INSUFFICIENT_EVIDENCE",
+    "expected_relevant_document_ids": [],
+    "should_answer": false,
+    "expected_answer_keywords": []
+  },
+  {
+    "id": "eval-024",
+    "category": "missing_evidence",
+    "query": "At what temperature does water boil at sea level?",
+    "expected_failure_type": "INSUFFICIENT_EVIDENCE",
+    "expected_relevant_document_ids": [],
+    "should_answer": false,
+    "expected_answer_keywords": []
+  },
+  {
+    "id": "eval-025",
+    "category": "missing_evidence",
+    "query": "What are the names of Mars's two moons?",
+    "expected_failure_type": "INSUFFICIENT_EVIDENCE",
+    "expected_relevant_document_ids": [],
+    "should_answer": false,
+    "expected_answer_keywords": []
+  }
+]
