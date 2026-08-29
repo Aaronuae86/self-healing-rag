@@ -5,3 +5,8 @@ data/phase1_faiss_index/
 .cache/
 results/squad_retrieval_metrics.json
 results/squad_retrieval_per_example.csv
+results/squad_calibration_diagnostics.csv
+results/squad_detector_calibration.json
+results/squad_stress_metrics.json
+results/squad_stress_per_example.csv
+results/squad_failure_confusion.csv
