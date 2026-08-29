@@ -60,6 +60,7 @@ class SquadStressSamplingConfig:
     corpus_size: int = 5_000
     calibration_question_count: int = 600
     calibration_screening_count: int = 5_000
+    calibration_screening_batch_size: int = 128
     calibration_failure_target_count: int = 150
     calibration_minimum_failure_count: int = 100
     calibration_missing_count: int = 200
@@ -188,6 +189,7 @@ def _validate_sampling_config(config: SquadStressSamplingConfig) -> None:
         config.corpus_size,
         config.calibration_question_count,
         config.calibration_screening_count,
+        config.calibration_screening_batch_size,
         config.calibration_failure_target_count,
         config.calibration_minimum_failure_count,
         config.calibration_paraphrase_attempt_count,
@@ -331,11 +333,15 @@ def prepare_squad_stress_dataset(
         screening_ids = list(
             dict.fromkeys([*calibration_seed_ids, *eligible_screening_ids])
         )[: settings.calibration_screening_count]
-        if len(screening_ids) < settings.calibration_screening_count:
+        minimum_screening_support = (
+            settings.calibration_question_count
+            + settings.calibration_minimum_failure_count
+        )
+        if len(screening_ids) < minimum_screening_support:
             raise ValueError(
                 "The fixed corpus does not contain enough TRAIN questions for the "
-                "configured calibration screening pool. Increase corpus_size or "
-                "reduce calibration_screening_count."
+                "minimum calibration support. Increase corpus_size or reduce the "
+                "healthy/minimum-failure targets."
             )
         manifest = {
             "manifest_version": STRESS_MANIFEST_VERSION,
@@ -443,6 +449,24 @@ class ExcludingRetriever:
         return [
             item for item in results if item.id not in self.excluded_document_ids
         ][:top_k]
+
+    def retrieve_many(self, queries: Sequence[str], top_k: int = 3):
+        fetch_k = min(len(self.documents), top_k + len(self.excluded_document_ids))
+        retrieve_many = getattr(self.retriever, "retrieve_many", None)
+        if retrieve_many is None:
+            result_lists = [
+                self.retriever.retrieve(query, top_k=fetch_k) for query in queries
+            ]
+        else:
+            result_lists = retrieve_many(queries, top_k=fetch_k)
+        return [
+            [
+                item
+                for item in results
+                if item.id not in self.excluded_document_ids
+            ][:top_k]
+            for results in result_lists
+        ]
 
 
 class RetrievalExclusionController:
@@ -668,21 +692,31 @@ def collect_initial_snapshots(
     candidate_k: int = 20,
     final_k: int = 10,
 ) -> list[InitialRetrievalSnapshot]:
-    """Batch cross-encoder scoring for a fixed group of initial retrievals."""
+    """Batch available retrieval and cross-encoder work for a fixed query group."""
 
-    dense_lists = [
-        dense_retriever.retrieve(query, top_k=candidate_k)
-        for query, _gold_id in queries_and_gold_ids
-    ]
-    bm25_lists = [
-        bm25_retriever.retrieve(query, top_k=candidate_k)
-        for query, _gold_id in queries_and_gold_ids
-    ]
+    queries = [query for query, _gold_id in queries_and_gold_ids]
+    dense_retrieve_many = getattr(dense_retriever, "retrieve_many", None)
+    dense_lists = (
+        dense_retrieve_many(queries, top_k=candidate_k)
+        if dense_retrieve_many is not None
+        else [
+            dense_retriever.retrieve(query, top_k=candidate_k)
+            for query in queries
+        ]
+    )
+    bm25_retrieve_many = getattr(bm25_retriever, "retrieve_many", None)
+    bm25_lists = (
+        bm25_retrieve_many(queries, top_k=candidate_k)
+        if bm25_retrieve_many is not None
+        else [
+            bm25_retriever.retrieve(query, top_k=candidate_k)
+            for query in queries
+        ]
+    )
     hybrid_lists = [
         hybrid_retriever.fuse(dense, bm25, top_k=candidate_k)
         for dense, bm25 in zip(dense_lists, bm25_lists)
     ]
-    queries = [query for query, _gold_id in queries_and_gold_ids]
     reranked_lists = reranker.rerank_many(
         queries, hybrid_lists, top_k=final_k
     )
@@ -758,6 +792,7 @@ def collect_calibration_diagnostics(
     minimum_failure_count: int = 100,
     missing_target_count: int = 200,
     paraphrase_attempt_count: int = 500,
+    screening_batch_size: int = 128,
     seed: int = 42,
     output_path: str | Path = "results/squad_calibration_diagnostics.csv",
     cutoff: int = 5,
@@ -769,51 +804,73 @@ def collect_calibration_diagnostics(
         raise ValueError("minimum_failure_count cannot exceed failure_target_count.")
     if missing_target_count > healthy_target_count:
         raise ValueError("missing_target_count cannot exceed healthy_target_count.")
+    if screening_batch_size < 1:
+        raise ValueError("screening_batch_size must be at least 1.")
     rows: list[dict] = []
     screened_healthy: list[dict] = []
     screened_failures: list[dict] = []
     total = len(dataset.calibration_questions)
     exclusion_controller.clear()
-    screening_snapshots = collect_initial_snapshots(
-        [
-            (question.original_query, question.gold_document_id)
-            for question in dataset.calibration_questions
-        ],
-        dense_retriever,
-        bm25_retriever,
-        hybrid_retriever,
-        reranker,
+    screened_questions: list[StressQuestion] = []
+    for batch_start in range(0, total, screening_batch_size):
+        if (
+            len(screened_healthy) >= healthy_target_count
+            and len(screened_failures) >= failure_target_count
+        ):
+            break
+        question_batch = dataset.calibration_questions[
+            batch_start : batch_start + screening_batch_size
+        ]
+        screening_snapshots = collect_initial_snapshots(
+            [
+                (question.original_query, question.gold_document_id)
+                for question in question_batch
+            ],
+            dense_retriever,
+            bm25_retriever,
+            hybrid_retriever,
+            reranker,
+        )
+        for batch_index, (question, snapshot) in enumerate(
+            zip(question_batch, screening_snapshots), start=1
+        ):
+            progress_index = batch_start + batch_index
+            if progress_callback:
+                progress_callback(progress_index, total, question)
+            screened_questions.append(question)
+            label = objective_label_from_rank(snapshot.gold_rank, cutoff=cutoff)
+            prediction = original_detector.classify(snapshot.diagnostics).failure_type
+            row = _diagnostic_row(
+                question.id,
+                "TRAIN_SCREEN_ORIGINAL",
+                question.original_query,
+                question.gold_document_id or "",
+                snapshot,
+                label,
+                prediction,
+            )
+            row.update(
+                {
+                    "source_example_id": question.id,
+                    "query_variant": "ORIGINAL",
+                    "included_in_calibration": False,
+                    "selection_reason": "SCREENED_ONLY",
+                }
+            )
+            candidate = {"question": question, "snapshot": snapshot, "row": row}
+            rows.append(row)
+            if label == ObjectiveFailureLabel.RETRIEVAL_FAILURE:
+                screened_failures.append(candidate)
+            else:
+                screened_healthy.append(candidate)
+
+    screened_original_count = len(screened_questions)
+    stopped_natural_screening_early = screened_original_count < total
+    natural_screening_stop_reason = (
+        "TARGET_SUPPORT_REACHED"
+        if stopped_natural_screening_early
+        else "CANDIDATE_POOL_EXHAUSTED"
     )
-    for progress_index, (question, snapshot) in enumerate(
-        zip(dataset.calibration_questions, screening_snapshots), start=1
-    ):
-        if progress_callback:
-            progress_callback(progress_index, total, question)
-        label = objective_label_from_rank(snapshot.gold_rank, cutoff=cutoff)
-        prediction = original_detector.classify(snapshot.diagnostics).failure_type
-        row = _diagnostic_row(
-            question.id,
-            "TRAIN_SCREEN_ORIGINAL",
-            question.original_query,
-            question.gold_document_id or "",
-            snapshot,
-            label,
-            prediction,
-        )
-        row.update(
-            {
-                "source_example_id": question.id,
-                "query_variant": "ORIGINAL",
-                "included_in_calibration": False,
-                "selection_reason": "SCREENED_ONLY",
-            }
-        )
-        candidate = {"question": question, "snapshot": snapshot, "row": row}
-        rows.append(row)
-        if label == ObjectiveFailureLabel.RETRIEVAL_FAILURE:
-            screened_failures.append(candidate)
-        else:
-            screened_healthy.append(candidate)
 
     manifest = json.loads(dataset.manifest_path.read_text(encoding="utf-8"))
     calibration_paraphrases = dict(manifest.get("calibration_paraphrases", {}))
@@ -884,11 +941,24 @@ def collect_calibration_diagnostics(
         manifest["calibration_paraphrases"] = calibration_paraphrases
         manifest["calibration_selection"] = {
             "cutoff": cutoff,
-            "screened_original_count": len(dataset.calibration_questions),
+            "natural_candidate_pool_count": total,
+            "screened_original_count": screened_original_count,
+            "screening_batch_size": screening_batch_size,
+            "natural_screening_stopped_early": stopped_natural_screening_early,
+            "natural_screening_stop_reason": natural_screening_stop_reason,
             "natural_retrieval_failure_count": len(screened_failures),
             "paraphrase_attempt_count": paraphrase_attempts,
             "paraphrase_retrieval_failure_count": len(paraphrase_failures),
             "minimum_failure_count": minimum_failure_count,
+            "screened_natural_question_ids": [
+                question.id for question in screened_questions
+            ],
+            "natural_retrieval_failure_example_ids": [
+                item["question"].id for item in screened_failures
+            ],
+            "paraphrase_retrieval_failure_example_ids": [
+                item["row"]["example_id"] for item in paraphrase_failures
+            ],
             "status": "INSUFFICIENT_RETRIEVAL_FAILURE_SUPPORT",
         }
         dataset.manifest_path.write_text(
@@ -898,7 +968,10 @@ def collect_calibration_diagnostics(
             "TRAIN screening produced only "
             f"{len(selected_failures)} objective top-{cutoff} retrieval failures; "
             f"at least {minimum_failure_count} are required. Increase the fixed "
-            "TRAIN screening pool or paraphrase attempt count."
+            "TRAIN screening pool or paraphrase attempt count. "
+            f"Natural questions screened: {screened_original_count}/{total}; "
+            f"natural failures: {len(screened_failures)}; paraphrase attempts: "
+            f"{paraphrase_attempts}; paraphrase failures: {len(paraphrase_failures)}."
         )
 
     examples: list[DiagnosticCalibrationExample] = []
@@ -972,7 +1045,11 @@ def collect_calibration_diagnostics(
     class_support = dict(Counter(item.objective_label.value for item in examples))
     construction_summary = {
         "cutoff": cutoff,
-        "screened_original_count": len(dataset.calibration_questions),
+        "natural_candidate_pool_count": total,
+        "screened_original_count": screened_original_count,
+        "screening_batch_size": screening_batch_size,
+        "natural_screening_stopped_early": stopped_natural_screening_early,
+        "natural_screening_stop_reason": natural_screening_stop_reason,
         "natural_retrieval_failure_count": len(screened_failures),
         "paraphrase_attempt_count": paraphrase_attempts,
         "paraphrase_retrieval_failure_count": len(paraphrase_failures),
@@ -984,6 +1061,15 @@ def collect_calibration_diagnostics(
     manifest["calibration_paraphrases"] = calibration_paraphrases
     manifest["calibration_selection"] = {
         **construction_summary,
+        "screened_natural_question_ids": [
+            question.id for question in screened_questions
+        ],
+        "natural_retrieval_failure_example_ids": [
+            item["question"].id for item in screened_failures
+        ],
+        "paraphrase_retrieval_failure_example_ids": [
+            item["row"]["example_id"] for item in paraphrase_failures
+        ],
         "selected_healthy_source_ids": [
             item["question"].id for item in selected_healthy
         ],
