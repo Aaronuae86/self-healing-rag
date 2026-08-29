@@ -212,19 +212,33 @@ class FAISSRetriever:
     def retrieve(self, query: str, top_k: int = 3) -> list[RetrievalResult]:
         """Return top-k documents in descending cosine-similarity order."""
 
+        return self.retrieve_many([query], top_k=top_k)[0]
+
+    def retrieve_many(
+        self, queries: Sequence[str], top_k: int = 3
+    ) -> list[list[RetrievalResult]]:
+        """Batch-encode queries and return one ranked result list per query."""
+
         if self.index is None:
             raise RuntimeError("Build or load an index before calling retrieve.")
-        if not query.strip():
-            raise ValueError("Query must not be empty.")
         if top_k < 1:
             raise ValueError("top_k must be at least 1.")
+        if not queries:
+            return []
+        if any(not query.strip() for query in queries):
+            raise ValueError("Queries must not be empty.")
 
-        query_vector = self._encode([query])
-        scores, positions = self.index.search(query_vector, min(top_k, len(self.documents)))
+        query_vectors = self._encode(queries)
+        scores, positions = self.index.search(
+            query_vectors, min(top_k, len(self.documents))
+        )
         return [
-            RetrievalResult(document=self.documents[position], score=float(score))
-            for score, position in zip(scores[0], positions[0])
-            if position >= 0
+            [
+                RetrievalResult(document=self.documents[position], score=float(score))
+                for score, position in zip(query_scores, query_positions)
+                if position >= 0
+            ]
+            for query_scores, query_positions in zip(scores, positions)
         ]
 
 

@@ -2,3 +2,6 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 data/phase1_faiss_index/
+.cache/
+results/squad_retrieval_metrics.json
+results/squad_retrieval_per_example.csv

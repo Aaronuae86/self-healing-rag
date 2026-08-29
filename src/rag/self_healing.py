@@ -56,6 +56,7 @@ class SelfHealingState(TypedDict, total=False):
     bm25_results: list[BM25Result]
     hybrid_results: list[HybridResult]
     reranked_results: list[RerankedResult]
+    reranked_results_history: list[list[RerankedResult]]
     retrieved_documents: list[RerankedResult]
     recovery_action: RecoveryAction
     final_answer: str
@@ -120,6 +121,7 @@ class SelfHealingRAGWorkflow:
             generator, max_new_tokens=self.config.rewrite_max_new_tokens
         )
         self.graph = self._build_graph()
+        self.retrieval_graph = self._build_retrieval_graph()
 
     def _validate_config(self) -> None:
         config = self.config
@@ -141,10 +143,14 @@ class SelfHealingRAGWorkflow:
     def _retrieve_node(self, state: SelfHealingState) -> dict:
         query = state["active_query"]
         depth = state.get("retrieval_depth", self.config.initial_retrieval_depth)
+        dense_results = self.dense_retriever.retrieve(query, top_k=depth)
+        bm25_results = self.bm25_retriever.retrieve(query, top_k=depth)
         return {
-            "dense_results": self.dense_retriever.retrieve(query, top_k=depth),
-            "bm25_results": self.bm25_retriever.retrieve(query, top_k=depth),
-            "hybrid_results": self.hybrid_retriever.retrieve(query, top_k=depth),
+            "dense_results": dense_results,
+            "bm25_results": bm25_results,
+            "hybrid_results": self.hybrid_retriever.fuse(
+                dense_results, bm25_results, top_k=depth
+            ),
             "path": self._append_path(state, "RETRIEVE"),
         }
 
@@ -156,6 +162,10 @@ class SelfHealingRAGWorkflow:
         )
         return {
             "reranked_results": reranked,
+            "reranked_results_history": [
+                *state.get("reranked_results_history", []),
+                reranked,
+            ],
             "retrieved_documents": reranked[: self.config.generation_top_k],
             "path": self._append_path(state, "RERANK"),
         }
@@ -239,6 +249,19 @@ class SelfHealingRAGWorkflow:
             "path": self._append_path(state, "ABSTAIN"),
         }
 
+    def _finalize_retrieval_node(self, state: SelfHealingState) -> dict:
+        """Finish a retrieval-only run without invoking answer generation."""
+
+        return {"path": self._append_path(state, "FINALIZE_RETRIEVAL")}
+
+    def _retrieval_abstain_node(self, state: SelfHealingState) -> dict:
+        """Record an abstention route without producing an answer string."""
+
+        return {
+            "recovery_action": RecoveryAction.ABSTAIN,
+            "path": self._append_path(state, "ABSTAIN"),
+        }
+
     def _build_graph(self):
         try:
             from langgraph.graph import END, START, StateGraph
@@ -277,12 +300,48 @@ class SelfHealingRAGWorkflow:
         builder.add_edge("abstain", END)
         return builder.compile()
 
-    def run(self, query: str) -> SelfHealingState:
-        """Run one query through the compiled, bounded self-healing graph."""
+    def _build_retrieval_graph(self):
+        """Compile the same healing path with retrieval-only terminal nodes."""
 
-        if not query.strip():
-            raise ValueError("Query must not be empty.")
-        initial_state: SelfHealingState = {
+        try:
+            from langgraph.graph import END, START, StateGraph
+        except ImportError as error:
+            raise ImportError(
+                "Install requirements.txt before creating SelfHealingRAGWorkflow."
+            ) from error
+
+        builder = StateGraph(SelfHealingState)
+        builder.add_node("retrieve", self._retrieve_node)
+        builder.add_node("rerank", self._rerank_node)
+        builder.add_node("diagnostics", self._diagnostics_node)
+        builder.add_node("classify", self._classify_node)
+        builder.add_node("expanded_retrieval", self._expanded_retrieval_node)
+        builder.add_node("rewrite_query", self._rewrite_query_node)
+        builder.add_node("finalize_retrieval", self._finalize_retrieval_node)
+        builder.add_node("abstain", self._retrieval_abstain_node)
+
+        builder.add_edge(START, "retrieve")
+        builder.add_edge("retrieve", "rerank")
+        builder.add_edge("rerank", "diagnostics")
+        builder.add_edge("diagnostics", "classify")
+        builder.add_conditional_edges(
+            "classify",
+            self._route_after_classification,
+            {
+                "generate": "finalize_retrieval",
+                "expanded_retrieval": "expanded_retrieval",
+                "rewrite_query": "rewrite_query",
+                "abstain": "abstain",
+            },
+        )
+        builder.add_edge("expanded_retrieval", "retrieve")
+        builder.add_edge("rewrite_query", "retrieve")
+        builder.add_edge("finalize_retrieval", END)
+        builder.add_edge("abstain", END)
+        return builder.compile()
+
+    def _initial_state(self, query: str) -> SelfHealingState:
+        return {
             "original_query": query,
             "active_query": query,
             "rewritten_query": None,
@@ -291,6 +350,20 @@ class SelfHealingRAGWorkflow:
             "recovery_action": RecoveryAction.NONE,
             "diagnostics_history": [],
             "failure_history": [],
+            "reranked_results_history": [],
             "path": [],
         }
-        return self.graph.invoke(initial_state)
+
+    def run(self, query: str) -> SelfHealingState:
+        """Run one query through the compiled, bounded self-healing graph."""
+
+        if not query.strip():
+            raise ValueError("Query must not be empty.")
+        return self.graph.invoke(self._initial_state(query))
+
+    def run_retrieval_only(self, query: str) -> SelfHealingState:
+        """Run retrieval, diagnostics, and recovery without generating an answer."""
+
+        if not query.strip():
+            raise ValueError("Query must not be empty.")
+        return self.retrieval_graph.invoke(self._initial_state(query))

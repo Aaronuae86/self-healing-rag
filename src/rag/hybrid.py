@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Protocol, Sequence
 
 from .baseline import FAISSRetriever, RetrievalResult
-from .bm25 import BM25Retriever
+from .bm25 import BM25Result, BM25Retriever
 
 
 class RankedResult(Protocol):
@@ -77,6 +77,18 @@ class HybridRetriever:
 
         dense_results = self.dense_retriever.retrieve(query, top_k=top_k)
         bm25_results = self.bm25_retriever.retrieve(query, top_k=top_k)
+        return self.fuse(dense_results, bm25_results, top_k=top_k)
+
+    def fuse(
+        self,
+        dense_results: Sequence[RetrievalResult],
+        bm25_results: Sequence[BM25Result],
+        top_k: int,
+    ) -> list[HybridResult]:
+        """Fuse already-computed dense and BM25 rankings with the same RRF rule."""
+
+        if top_k < 1:
+            raise ValueError("top_k must be at least 1.")
         fused: dict[str, dict] = {}
 
         for rank, result in enumerate(dense_results, start=1):
