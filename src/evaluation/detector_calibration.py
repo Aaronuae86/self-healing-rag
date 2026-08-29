@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import random
+from collections import Counter
 from dataclasses import asdict, dataclass, replace
 from enum import Enum
 from pathlib import Path
@@ -68,6 +69,8 @@ class DetectorEvaluation:
     binary: BinaryFailureMetrics
     failure_mode: FailureModeMetrics
     insufficient_evidence_recall: float
+    retrieval_failure_recall: float
+    class_support: dict[str, int]
     natural_unanswerable_prediction_counts: dict[str, int]
 
     def to_dict(self) -> dict:
@@ -81,7 +84,10 @@ class DetectorCalibrationResult:
     label: str
     seed: int
     candidate_count: int
+    eligible_candidate_count: int
     selection_score: float
+    maximum_healthy_false_positive_rate: float
+    healthy_false_positive_constraint_satisfied: bool
     original_config: FailureDetectorConfig
     selected_config: FailureDetectorConfig
     original_train_metrics: DetectorEvaluation
@@ -93,7 +99,10 @@ class DetectorCalibrationResult:
             "label": self.label,
             "seed": self.seed,
             "candidate_count": self.candidate_count,
+            "eligible_candidate_count": self.eligible_candidate_count,
             "selection_score": self.selection_score,
+            "maximum_healthy_false_positive_rate": self.maximum_healthy_false_positive_rate,
+            "healthy_false_positive_constraint_satisfied": self.healthy_false_positive_constraint_satisfied,
             "original_config": asdict(self.original_config),
             "selected_config": asdict(self.selected_config),
             "original_train_metrics": self.original_train_metrics.to_dict(),
@@ -232,13 +241,24 @@ def evaluate_detector(
     for truth, guess in zip(actual, predicted):
         if truth == ObjectiveFailureLabel.NATURAL_UNANSWERABLE:
             natural_predictions[guess.value] = natural_predictions.get(guess.value, 0) + 1
+    binary = compute_binary_failure_metrics(actual, predicted)
+    failure_mode = compute_failure_mode_metrics(actual, predicted)
     return DetectorEvaluation(
-        binary=compute_binary_failure_metrics(actual, predicted),
-        failure_mode=compute_failure_mode_metrics(actual, predicted),
+        binary=binary,
+        failure_mode=failure_mode,
         insufficient_evidence_recall=_safe_ratio(
             sum(item == RetrievalFailure.INSUFFICIENT_EVIDENCE for item in missing_predictions),
             len(missing_predictions),
         ),
+        retrieval_failure_recall=float(
+            failure_mode.per_class[ObjectiveFailureLabel.RETRIEVAL_FAILURE.value][
+                "recall"
+            ]
+        ),
+        class_support={
+            label.value: int(failure_mode.per_class[label.value]["support"])
+            for label in SUPERVISED_LABELS
+        },
         natural_unanswerable_prediction_counts=natural_predictions,
     )
 
@@ -323,13 +343,22 @@ def _candidate_values(values: Sequence[float], fallback: float) -> tuple[float, 
 
 def _selection_score(metrics: DetectorEvaluation) -> float:
     binary = metrics.binary
-    specificity = 1.0 - binary.false_positive_rate
     return (
-        0.35 * binary.recall
-        + 0.25 * specificity
+        0.25 * binary.recall
+        + 0.20 * binary.precision
         + 0.25 * metrics.insufficient_evidence_recall
-        + 0.15 * metrics.failure_mode.macro_f1
+        + 0.20 * metrics.retrieval_failure_recall
+        + 0.10 * metrics.failure_mode.macro_f1
     )
+
+
+def _constrained_selection_score(
+    metrics: DetectorEvaluation, maximum_false_positive_rate: float
+) -> float:
+    excess_false_positives = max(
+        0.0, metrics.binary.false_positive_rate - maximum_false_positive_rate
+    )
+    return _selection_score(metrics) - 5.0 * excess_false_positives
 
 
 def calibrate_failure_detector(
@@ -337,11 +366,16 @@ def calibrate_failure_detector(
     original_config: FailureDetectorConfig | None = None,
     seed: int = 42,
     candidate_count: int = 256,
+    maximum_healthy_false_positive_rate: float = 0.15,
 ) -> DetectorCalibrationResult:
     """Search train-derived quantile combinations without validation feedback."""
 
     if candidate_count < 1:
         raise ValueError("candidate_count must be at least 1.")
+    if not 0.0 <= maximum_healthy_false_positive_rate <= 1.0:
+        raise ValueError(
+            "maximum_healthy_false_positive_rate must be between 0 and 1."
+        )
     supervised = [
         item
         for item in examples
@@ -349,6 +383,15 @@ def calibrate_failure_detector(
     ]
     if not supervised:
         raise ValueError("Calibration requires supervised train examples.")
+    support = Counter(item.objective_label for item in supervised)
+    missing_labels = [
+        label.value for label in SUPERVISED_LABELS if support[label] == 0
+    ]
+    if missing_labels:
+        raise ValueError(
+            "Calibration requires support for every objective class; missing: "
+            + ", ".join(missing_labels)
+        )
     base = original_config or FailureDetectorConfig()
     missing = [item for item in supervised if item.objective_label == ObjectiveFailureLabel.MISSING_EVIDENCE]
     rng = random.Random(seed)
@@ -434,13 +477,26 @@ def calibrate_failure_detector(
             seen.add(key)
             configs.append(candidate)
 
-    original_metrics = evaluate_detector(supervised, RetrievalFailureDetector(base))
-    best_config = base
-    best_metrics = original_metrics
-    best_score = _selection_score(best_metrics)
-    for config in configs[1:]:
-        metrics = evaluate_detector(supervised, RetrievalFailureDetector(config))
-        score = _selection_score(metrics)
+    evaluated = [
+        (config, evaluate_detector(supervised, RetrievalFailureDetector(config)))
+        for config in configs
+    ]
+    original_metrics = evaluated[0][1]
+    eligible = [
+        item
+        for item in evaluated
+        if item[1].binary.false_positive_rate
+        <= maximum_healthy_false_positive_rate
+    ]
+    selection_pool = eligible or evaluated
+    best_config, best_metrics = selection_pool[0]
+    best_score = _constrained_selection_score(
+        best_metrics, maximum_healthy_false_positive_rate
+    )
+    for config, metrics in selection_pool[1:]:
+        score = _constrained_selection_score(
+            metrics, maximum_healthy_false_positive_rate
+        )
         tie_breaker = (metrics.binary.f1, metrics.failure_mode.macro_f1)
         best_tie_breaker = (best_metrics.binary.f1, best_metrics.failure_mode.macro_f1)
         if score > best_score or (score == best_score and tie_breaker > best_tie_breaker):
@@ -452,7 +508,13 @@ def calibrate_failure_detector(
         label="TRAIN-CALIBRATED",
         seed=seed,
         candidate_count=len(configs),
+        eligible_candidate_count=len(eligible),
         selection_score=best_score,
+        maximum_healthy_false_positive_rate=maximum_healthy_false_positive_rate,
+        healthy_false_positive_constraint_satisfied=(
+            best_metrics.binary.false_positive_rate
+            <= maximum_healthy_false_positive_rate
+        ),
         original_config=base,
         selected_config=best_config,
         original_train_metrics=original_metrics,

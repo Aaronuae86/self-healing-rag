@@ -43,7 +43,7 @@ from .squad_retrieval import (
 )
 
 
-STRESS_MANIFEST_VERSION = 1
+STRESS_MANIFEST_VERSION = 2
 
 
 class StressTrack(str, Enum):
@@ -58,9 +58,15 @@ class StressTrack(str, Enum):
 @dataclass(frozen=True)
 class SquadStressSamplingConfig:
     corpus_size: int = 5_000
-    calibration_question_count: int = 1_000
-    calibration_missing_count: int = 250
+    calibration_question_count: int = 600
+    calibration_screening_count: int = 5_000
+    calibration_failure_target_count: int = 150
+    calibration_minimum_failure_count: int = 100
+    calibration_missing_count: int = 200
+    calibration_paraphrase_attempt_count: int = 500
     hard_distractor_count: int = 100
+    hard_distractor_candidate_count: int = 2_500
+    hard_distractor_minimum_induced_count: int = 25
     paraphrase_pair_count: int = 50
     controlled_missing_count: int = 100
     natural_unanswerable_count: int = 100
@@ -101,6 +107,23 @@ class InitialRetrievalSnapshot:
     diagnostics: RetrievalDiagnostics
     reranked_results: tuple
     gold_rank: int | None
+
+
+@dataclass(frozen=True)
+class CalibrationDatasetResult:
+    examples: tuple[DiagnosticCalibrationExample, ...]
+    rows: tuple[dict, ...]
+    class_support: dict[str, int]
+    construction_summary: dict
+
+
+@dataclass(frozen=True)
+class HardDistractorSelection:
+    selected_distractors: dict[str, tuple[str, ...]]
+    screening_rows: tuple[dict, ...]
+    candidate_count: int
+    induced_failure_count: int
+    selected_count: int
 
 
 @dataclass(frozen=True)
@@ -164,7 +187,13 @@ def _validate_sampling_config(config: SquadStressSamplingConfig) -> None:
     count_fields = (
         config.corpus_size,
         config.calibration_question_count,
+        config.calibration_screening_count,
+        config.calibration_failure_target_count,
+        config.calibration_minimum_failure_count,
+        config.calibration_paraphrase_attempt_count,
         config.hard_distractor_count,
+        config.hard_distractor_candidate_count,
+        config.hard_distractor_minimum_induced_count,
         config.paraphrase_pair_count,
         config.controlled_missing_count,
         config.natural_unanswerable_count,
@@ -173,6 +202,18 @@ def _validate_sampling_config(config: SquadStressSamplingConfig) -> None:
         raise ValueError("Corpus and track counts must be at least 1.")
     if not 0 <= config.calibration_missing_count <= config.calibration_question_count:
         raise ValueError("calibration_missing_count must fit inside calibration questions.")
+    if config.calibration_minimum_failure_count > config.calibration_failure_target_count:
+        raise ValueError(
+            "calibration_minimum_failure_count cannot exceed its failure target."
+        )
+    if config.hard_distractor_count > config.hard_distractor_candidate_count:
+        raise ValueError(
+            "hard_distractor_count cannot exceed hard_distractor_candidate_count."
+        )
+    if config.hard_distractor_minimum_induced_count > config.hard_distractor_count:
+        raise ValueError(
+            "hard_distractor_minimum_induced_count cannot exceed the selected target."
+        )
 
 
 def _manifest_matches(manifest: dict, config: SquadStressSamplingConfig) -> bool:
@@ -225,7 +266,7 @@ def prepare_squad_stress_dataset(
 
     context_pool: dict[str, Document] = {}
     if manifest is None:
-        calibration_ids = _sample_ids(
+        calibration_seed_ids = _sample_ids(
             train_answerable, settings.calibration_question_count, settings.seed
         )
         validation_ids = _sample_ids(
@@ -245,10 +286,23 @@ def prepare_squad_stress_dataset(
             settings.natural_unanswerable_count,
             settings.seed + 2,
         )
+        used_validation_ids = set(validation_ids) | set(natural_ids)
+        additional_hard_pool = [
+            item
+            for item in validation_answerable
+            if str(item["id"]) not in used_validation_ids
+        ]
+        additional_hard_ids = _sample_ids(
+            additional_hard_pool,
+            settings.hard_distractor_candidate_count - len(hard_ids),
+            settings.seed + 4,
+        )
+        hard_candidate_ids = [*hard_ids, *additional_hard_ids]
 
         selected_records = [
-            *(train_by_id[item] for item in calibration_ids),
+            *(train_by_id[item] for item in calibration_seed_ids),
             *(validation_by_id[item] for item in validation_ids),
+            *(validation_by_id[item] for item in additional_hard_ids),
             *(validation_by_id[item] for item in natural_ids),
         ]
         required_document_ids = list(
@@ -267,19 +321,39 @@ def prepare_squad_stress_dataset(
         ]
         if len(document_ids) != settings.corpus_size:
             raise ValueError("Not enough unique SQuAD contexts for the configured corpus.")
+        document_id_set = set(document_ids)
+        eligible_screening_ids = [
+            str(item["id"])
+            for item in train_answerable
+            if _document(item).id in document_id_set
+        ]
+        random.Random(settings.seed + 5).shuffle(eligible_screening_ids)
+        screening_ids = list(
+            dict.fromkeys([*calibration_seed_ids, *eligible_screening_ids])
+        )[: settings.calibration_screening_count]
+        if len(screening_ids) < settings.calibration_screening_count:
+            raise ValueError(
+                "The fixed corpus does not contain enough TRAIN questions for the "
+                "configured calibration screening pool. Increase corpus_size or "
+                "reduce calibration_screening_count."
+            )
         manifest = {
             "manifest_version": STRESS_MANIFEST_VERSION,
             "sampling_config": _config_dict(settings),
             "document_ids": document_ids,
-            "calibration_question_ids": calibration_ids,
-            "calibration_missing_ids": calibration_ids[: settings.calibration_missing_count],
+            "calibration_seed_question_ids": calibration_seed_ids,
+            "calibration_screening_question_ids": screening_ids,
+            "calibration_selection": {},
+            "calibration_paraphrases": {},
             "validation_tracks": {
-                StressTrack.HARD_DISTRACTOR.value: hard_ids,
+                StressTrack.HARD_DISTRACTOR.value: hard_candidate_ids,
                 StressTrack.PARAPHRASE_ORIGINAL.value: paraphrase_ids,
                 StressTrack.CONTROLLED_MISSING_EVIDENCE.value: missing_ids,
                 StressTrack.NATURAL_UNANSWERABLE.value: natural_ids,
             },
             "hard_distractors": {},
+            "hard_distractor_screening": [],
+            "hard_distractor_selected_ids": [],
             "paraphrases": {},
             "train_fingerprint": getattr(dataset["train"], "_fingerprint", None),
             "validation_fingerprint": getattr(dataset["validation"], "_fingerprint", None),
@@ -312,7 +386,7 @@ def prepare_squad_stress_dataset(
 
     calibration_questions = tuple(
         make_question(train_by_id[item], StressTrack.TRAIN_CALIBRATION)
-        for item in manifest["calibration_question_ids"]
+        for item in manifest["calibration_screening_question_ids"]
     )
     tracks = manifest["validation_tracks"]
     validation_questions: list[StressQuestion] = []
@@ -335,11 +409,17 @@ def prepare_squad_stress_dataset(
         make_question(validation_by_id[item], StressTrack.NATURAL_UNANSWERABLE)
         for item in tracks[StressTrack.NATURAL_UNANSWERABLE.value]
     )
-    fingerprint_payload = "\n".join(manifest["document_ids"] + manifest["calibration_question_ids"])
+    fingerprint_payload = "\n".join(
+        manifest["document_ids"] + manifest["calibration_screening_question_ids"]
+    )
     return SquadStressDataset(
         documents=documents,
         calibration_questions=calibration_questions,
-        calibration_missing_ids=tuple(manifest["calibration_missing_ids"]),
+        calibration_missing_ids=tuple(
+            manifest.get("calibration_selection", {}).get(
+                "selected_missing_source_ids", ()
+            )
+        ),
         validation_questions=tuple(validation_questions),
         manifest_path=output_path,
         fingerprint=hashlib.sha256(fingerprint_payload.encode()).hexdigest()[:16],
@@ -441,37 +521,115 @@ def prepare_paraphrases(
 
 def select_hard_distractors(
     dataset: SquadStressDataset,
-    dense_retriever: CachedDenseRetriever,
+    candidate_dense_retriever: CachedDenseRetriever,
+    dense_retriever,
+    bm25_retriever,
+    hybrid_retriever: HybridRetriever,
+    reranker: CachedCrossEncoderReranker,
+    exclusion_controller: RetrievalExclusionController,
     per_question: int = 20,
     search_depth: int = 100,
-) -> dict[str, tuple[str, ...]]:
+    target_count: int = 100,
+    minimum_induced_count: int = 1,
+    cutoff: int = 5,
+    progress_callback: Callable[[int, int, StressQuestion], None] | None = None,
+) -> HardDistractorSelection:
+    """Select only cases where fixed distractors objectively induce a top-k miss."""
+
     questions = [
         item
         for item in dataset.validation_questions
         if item.track == StressTrack.HARD_DISTRACTOR
     ]
-    ranked_lists = dense_retriever.preload(
+    ranked_lists = candidate_dense_retriever.preload(
         [item.original_query for item in questions], top_k=search_depth
     )
     document_by_id = {item.id: item for item in dataset.documents}
-    selected: dict[str, tuple[str, ...]] = {}
-    for question, ranked in zip(questions, ranked_lists):
+    induced: list[tuple[StressQuestion, tuple[str, ...]]] = []
+    screening_rows: list[dict] = []
+    for index, (question, ranked) in enumerate(
+        zip(questions, ranked_lists), start=1
+    ):
+        if progress_callback:
+            progress_callback(index, len(questions), question)
         non_gold = [item for item in ranked if item.id != question.gold_document_id]
+        exclusion_controller.clear()
+        stressed = collect_initial_snapshot(
+            question.original_query,
+            question.gold_document_id,
+            dense_retriever,
+            bm25_retriever,
+            hybrid_retriever,
+            reranker,
+        )
+        strongest_non_gold = [
+            item.id
+            for item in stressed.reranked_results
+            if item.id != question.gold_document_id
+        ]
         same_topic = [
             item.id
             for item in non_gold
             if document_by_id[item.id].title == question.title
         ]
         nearest = [item.id for item in non_gold]
-        selected[question.id] = tuple(dict.fromkeys([*same_topic, *nearest]))[:per_question]
+        distractor_ids = tuple(
+            dict.fromkeys([*strongest_non_gold, *same_topic, *nearest])
+        )[:per_question]
+        exclusion_controller.set_excluded(distractor_ids)
+        control = collect_initial_snapshot(
+            question.original_query,
+            question.gold_document_id,
+            dense_retriever,
+            bm25_retriever,
+            hybrid_retriever,
+            reranker,
+        )
+        objectively_induced = (
+            control.gold_rank is not None
+            and control.gold_rank <= cutoff
+            and is_initial_failure_at_cutoff(stressed.gold_rank, cutoff)
+        )
+        screening_rows.append(
+            {
+                "example_id": question.id,
+                "query": question.original_query,
+                "gold_document_id": question.gold_document_id,
+                "distractor_ids": list(distractor_ids),
+                "control_gold_rank_without_selected_distractors": control.gold_rank,
+                "stressed_gold_rank_with_selected_distractors": stressed.gold_rank,
+                f"induced_failure_at_{cutoff}": objectively_induced,
+            }
+        )
+        if objectively_induced:
+            induced.append((question, distractor_ids))
+    exclusion_controller.clear()
+    selected_pairs = induced[:target_count]
+    selected = {item.id: distractors for item, distractors in selected_pairs}
     manifest = json.loads(dataset.manifest_path.read_text(encoding="utf-8"))
     manifest["hard_distractors"] = {
         key: list(value) for key, value in selected.items()
     }
+    manifest["hard_distractor_screening"] = screening_rows
+    manifest["hard_distractor_selected_ids"] = list(selected)
     dataset.manifest_path.write_text(
         json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8"
     )
-    return selected
+    result = HardDistractorSelection(
+        selected_distractors=selected,
+        screening_rows=tuple(screening_rows),
+        candidate_count=len(questions),
+        induced_failure_count=len(induced),
+        selected_count=len(selected),
+    )
+    if result.induced_failure_count < minimum_induced_count:
+        raise RuntimeError(
+            "The fixed hard-distractor candidate pool induced only "
+            f"{result.induced_failure_count} top-{cutoff} failures; at least "
+            f"{minimum_induced_count} are required. Increase "
+            "hard_distractor_candidate_count before running the benchmark."
+        )
+    return result
 
 
 def collect_initial_snapshot(
@@ -499,6 +657,65 @@ def collect_initial_snapshot(
             else None
         ),
     )
+
+
+def collect_initial_snapshots(
+    queries_and_gold_ids: Sequence[tuple[str, str | None]],
+    dense_retriever,
+    bm25_retriever,
+    hybrid_retriever: HybridRetriever,
+    reranker: CachedCrossEncoderReranker,
+    candidate_k: int = 20,
+    final_k: int = 10,
+) -> list[InitialRetrievalSnapshot]:
+    """Batch cross-encoder scoring for a fixed group of initial retrievals."""
+
+    dense_lists = [
+        dense_retriever.retrieve(query, top_k=candidate_k)
+        for query, _gold_id in queries_and_gold_ids
+    ]
+    bm25_lists = [
+        bm25_retriever.retrieve(query, top_k=candidate_k)
+        for query, _gold_id in queries_and_gold_ids
+    ]
+    hybrid_lists = [
+        hybrid_retriever.fuse(dense, bm25, top_k=candidate_k)
+        for dense, bm25 in zip(dense_lists, bm25_lists)
+    ]
+    queries = [query for query, _gold_id in queries_and_gold_ids]
+    reranked_lists = reranker.rerank_many(
+        queries, hybrid_lists, top_k=final_k
+    )
+    snapshots: list[InitialRetrievalSnapshot] = []
+    for (
+        (query, gold_document_id),
+        dense,
+        bm25,
+        hybrid,
+        reranked,
+    ) in zip(
+        queries_and_gold_ids,
+        dense_lists,
+        bm25_lists,
+        hybrid_lists,
+        reranked_lists,
+    ):
+        diagnostics = compute_retrieval_diagnostics(
+            query, dense, bm25, hybrid, reranked
+        )
+        ids = tuple(item.id for item in reranked)
+        snapshots.append(
+            InitialRetrievalSnapshot(
+                diagnostics=diagnostics,
+                reranked_results=tuple(reranked),
+                gold_rank=(
+                    gold_document_rank(ids, gold_document_id)
+                    if gold_document_id is not None
+                    else None
+                ),
+            )
+        )
+    return snapshots
 
 
 def _diagnostic_row(
@@ -535,21 +752,187 @@ def collect_calibration_diagnostics(
     reranker: CachedCrossEncoderReranker,
     exclusion_controller: RetrievalExclusionController,
     original_detector: RetrievalFailureDetector,
+    paraphraser: LocalQwenParaphraser | None = None,
+    healthy_target_count: int = 600,
+    failure_target_count: int = 150,
+    minimum_failure_count: int = 100,
+    missing_target_count: int = 200,
+    paraphrase_attempt_count: int = 500,
+    seed: int = 42,
     output_path: str | Path = "results/squad_calibration_diagnostics.csv",
     cutoff: int = 5,
     progress_callback: Callable[[int, int, StressQuestion], None] | None = None,
-) -> tuple[list[DiagnosticCalibrationExample], list[dict]]:
+) -> CalibrationDatasetResult:
+    """Mine balanced, objectively labeled calibration support from TRAIN only."""
+
+    if minimum_failure_count > failure_target_count:
+        raise ValueError("minimum_failure_count cannot exceed failure_target_count.")
+    if missing_target_count > healthy_target_count:
+        raise ValueError("missing_target_count cannot exceed healthy_target_count.")
     rows: list[dict] = []
-    examples: list[DiagnosticCalibrationExample] = []
-    missing_ids = set(dataset.calibration_missing_ids)
-    total = len(dataset.calibration_questions) + len(missing_ids)
-    progress_index = 0
-    for question in dataset.calibration_questions:
-        progress_index += 1
+    screened_healthy: list[dict] = []
+    screened_failures: list[dict] = []
+    total = len(dataset.calibration_questions)
+    exclusion_controller.clear()
+    screening_snapshots = collect_initial_snapshots(
+        [
+            (question.original_query, question.gold_document_id)
+            for question in dataset.calibration_questions
+        ],
+        dense_retriever,
+        bm25_retriever,
+        hybrid_retriever,
+        reranker,
+    )
+    for progress_index, (question, snapshot) in enumerate(
+        zip(dataset.calibration_questions, screening_snapshots), start=1
+    ):
         if progress_callback:
             progress_callback(progress_index, total, question)
-        exclusion_controller.clear()
-        snapshot = collect_initial_snapshot(
+        label = objective_label_from_rank(snapshot.gold_rank, cutoff=cutoff)
+        prediction = original_detector.classify(snapshot.diagnostics).failure_type
+        row = _diagnostic_row(
+            question.id,
+            "TRAIN_SCREEN_ORIGINAL",
+            question.original_query,
+            question.gold_document_id or "",
+            snapshot,
+            label,
+            prediction,
+        )
+        row.update(
+            {
+                "source_example_id": question.id,
+                "query_variant": "ORIGINAL",
+                "included_in_calibration": False,
+                "selection_reason": "SCREENED_ONLY",
+            }
+        )
+        candidate = {"question": question, "snapshot": snapshot, "row": row}
+        rows.append(row)
+        if label == ObjectiveFailureLabel.RETRIEVAL_FAILURE:
+            screened_failures.append(candidate)
+        else:
+            screened_healthy.append(candidate)
+
+    manifest = json.loads(dataset.manifest_path.read_text(encoding="utf-8"))
+    calibration_paraphrases = dict(manifest.get("calibration_paraphrases", {}))
+    paraphrase_failures: list[dict] = []
+    paraphrase_attempts = 0
+    if len(screened_failures) < failure_target_count and paraphraser is not None:
+        paraphrase_candidates = list(screened_healthy)
+        random.Random(seed + 6).shuffle(paraphrase_candidates)
+        for candidate in paraphrase_candidates[:paraphrase_attempt_count]:
+            question = candidate["question"]
+            transformed = calibration_paraphrases.get(question.id)
+            if transformed is None:
+                transformed = paraphraser.paraphrase(question.original_query)
+                calibration_paraphrases[question.id] = transformed
+            paraphrase_attempts += 1
+            snapshot = collect_initial_snapshot(
+                transformed,
+                question.gold_document_id,
+                dense_retriever,
+                bm25_retriever,
+                hybrid_retriever,
+                reranker,
+            )
+            label = objective_label_from_rank(snapshot.gold_rank, cutoff=cutoff)
+            prediction = original_detector.classify(snapshot.diagnostics).failure_type
+            row = _diagnostic_row(
+                f"{question.id}:paraphrase",
+                "TRAIN_SCREEN_PARAPHRASE",
+                transformed,
+                question.gold_document_id or "",
+                snapshot,
+                label,
+                prediction,
+            )
+            row.update(
+                {
+                    "source_example_id": question.id,
+                    "query_variant": "PARAPHRASE",
+                    "included_in_calibration": False,
+                    "selection_reason": "SCREENED_ONLY",
+                }
+            )
+            rows.append(row)
+            if label == ObjectiveFailureLabel.RETRIEVAL_FAILURE:
+                paraphrase_failures.append(
+                    {"question": question, "snapshot": snapshot, "row": row}
+                )
+                if len(screened_failures) + len(paraphrase_failures) >= failure_target_count:
+                    break
+
+    all_failures = [*screened_failures, *paraphrase_failures]
+    failure_source_ids = {
+        item["question"].id for item in all_failures[:failure_target_count]
+    }
+    healthy_candidates = [
+        item
+        for item in screened_healthy
+        if item["question"].id not in failure_source_ids
+    ]
+    selected_healthy = healthy_candidates[:healthy_target_count]
+    selected_failures = all_failures[:failure_target_count]
+    if len(selected_healthy) < healthy_target_count:
+        raise RuntimeError(
+            f"Only {len(selected_healthy)} healthy TRAIN examples were available; "
+            f"{healthy_target_count} are required. Increase calibration_screening_count."
+        )
+    if len(selected_failures) < minimum_failure_count:
+        manifest["calibration_paraphrases"] = calibration_paraphrases
+        manifest["calibration_selection"] = {
+            "cutoff": cutoff,
+            "screened_original_count": len(dataset.calibration_questions),
+            "natural_retrieval_failure_count": len(screened_failures),
+            "paraphrase_attempt_count": paraphrase_attempts,
+            "paraphrase_retrieval_failure_count": len(paraphrase_failures),
+            "minimum_failure_count": minimum_failure_count,
+            "status": "INSUFFICIENT_RETRIEVAL_FAILURE_SUPPORT",
+        }
+        dataset.manifest_path.write_text(
+            json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+        raise RuntimeError(
+            "TRAIN screening produced only "
+            f"{len(selected_failures)} objective top-{cutoff} retrieval failures; "
+            f"at least {minimum_failure_count} are required. Increase the fixed "
+            "TRAIN screening pool or paraphrase attempt count."
+        )
+
+    examples: list[DiagnosticCalibrationExample] = []
+    for index, candidate in enumerate(selected_healthy):
+        candidate["row"]["included_in_calibration"] = True
+        candidate["row"]["selection_reason"] = "SELECTED_HEALTHY"
+        examples.append(
+            DiagnosticCalibrationExample(
+                f"{candidate['question'].id}:healthy:{index}",
+                ObjectiveFailureLabel.HEALTHY,
+                candidate["snapshot"].diagnostics,
+            )
+        )
+    for index, candidate in enumerate(selected_failures):
+        reason = (
+            "SELECTED_NATURAL_RETRIEVAL_FAILURE"
+            if candidate["row"]["query_variant"] == "ORIGINAL"
+            else "SELECTED_PARAPHRASE_RETRIEVAL_FAILURE"
+        )
+        candidate["row"]["included_in_calibration"] = True
+        candidate["row"]["selection_reason"] = reason
+        examples.append(
+            DiagnosticCalibrationExample(
+                f"{candidate['question'].id}:retrieval_failure:{index}",
+                ObjectiveFailureLabel.RETRIEVAL_FAILURE,
+                candidate["snapshot"].diagnostics,
+            )
+        )
+
+    selected_missing_sources = selected_healthy[:missing_target_count]
+    for index, candidate in enumerate(selected_missing_sources):
+        question = candidate["question"]
+        exclusion_controller.set_excluded((question.gold_document_id,))
+        missing_snapshot = collect_initial_snapshot(
             question.original_query,
             question.gold_document_id,
             dense_retriever,
@@ -557,61 +940,75 @@ def collect_calibration_diagnostics(
             hybrid_retriever,
             reranker,
         )
-        label = objective_label_from_rank(snapshot.gold_rank, cutoff=cutoff)
-        prediction = original_detector.classify(snapshot.diagnostics).failure_type
-        examples.append(DiagnosticCalibrationExample(question.id, label, snapshot.diagnostics))
-        rows.append(
-            _diagnostic_row(
-                question.id,
-                "TRAIN_RETRIEVAL",
-                question.original_query,
-                question.gold_document_id or "",
-                snapshot,
-                label,
-                prediction,
+        missing_prediction = original_detector.classify(
+            missing_snapshot.diagnostics
+        ).failure_type
+        examples.append(
+            DiagnosticCalibrationExample(
+                f"{question.id}:missing:{index}",
+                ObjectiveFailureLabel.MISSING_EVIDENCE,
+                missing_snapshot.diagnostics,
             )
         )
-        if question.id in missing_ids:
-            progress_index += 1
-            exclusion_controller.set_excluded((question.gold_document_id,))
-            missing_snapshot = collect_initial_snapshot(
-                question.original_query,
-                question.gold_document_id,
-                dense_retriever,
-                bm25_retriever,
-                hybrid_retriever,
-                reranker,
-            )
-            missing_label = ObjectiveFailureLabel.MISSING_EVIDENCE
-            missing_prediction = original_detector.classify(
-                missing_snapshot.diagnostics
-            ).failure_type
-            examples.append(
-                DiagnosticCalibrationExample(
-                    f"{question.id}:missing",
-                    missing_label,
-                    missing_snapshot.diagnostics,
-                )
-            )
-            rows.append(
-                _diagnostic_row(
-                    question.id,
-                    "TRAIN_CONTROLLED_MISSING",
-                    question.original_query,
-                    question.gold_document_id or "",
-                    missing_snapshot,
-                    missing_label,
-                    missing_prediction,
-                )
-            )
+        missing_row = _diagnostic_row(
+            f"{question.id}:missing",
+            "TRAIN_CONTROLLED_MISSING",
+            question.original_query,
+            question.gold_document_id or "",
+            missing_snapshot,
+            ObjectiveFailureLabel.MISSING_EVIDENCE,
+            missing_prediction,
+        )
+        missing_row.update(
+            {
+                "source_example_id": question.id,
+                "query_variant": "CONTROLLED_MISSING",
+                "included_in_calibration": True,
+                "selection_reason": "SELECTED_CONTROLLED_MISSING",
+            }
+        )
+        rows.append(missing_row)
     exclusion_controller.clear()
+    class_support = dict(Counter(item.objective_label.value for item in examples))
+    construction_summary = {
+        "cutoff": cutoff,
+        "screened_original_count": len(dataset.calibration_questions),
+        "natural_retrieval_failure_count": len(screened_failures),
+        "paraphrase_attempt_count": paraphrase_attempts,
+        "paraphrase_retrieval_failure_count": len(paraphrase_failures),
+        "selected_class_support": class_support,
+        "minimum_failure_count": minimum_failure_count,
+        "failure_target_count": failure_target_count,
+        "status": "READY",
+    }
+    manifest["calibration_paraphrases"] = calibration_paraphrases
+    manifest["calibration_selection"] = {
+        **construction_summary,
+        "selected_healthy_source_ids": [
+            item["question"].id for item in selected_healthy
+        ],
+        "selected_failure_example_ids": [
+            item["row"]["example_id"] for item in selected_failures
+        ],
+        "selected_missing_source_ids": [
+            item["question"].id for item in selected_missing_sources
+        ],
+    }
+    dataset.manifest_path.write_text(
+        json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
     output = Path(output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
     with output.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=list(rows[0].keys()))
         writer.writeheader()
         writer.writerows(rows)
-    return examples, rows
+    return CalibrationDatasetResult(
+        examples=tuple(examples),
+        rows=tuple(rows),
+        class_support=class_support,
+        construction_summary=construction_summary,
+    )
 
 
 class SquadStressBenchmark:
@@ -651,6 +1048,7 @@ class SquadStressBenchmark:
         hard_distractors: dict[str, Sequence[str]],
         paraphrases: dict[str, str],
         calibration_summary: dict,
+        stress_construction_summary: dict | None = None,
         progress_callback: Callable[[int, int, StressQuestion], None] | None = None,
     ) -> tuple[list[StressEvaluationRecord], dict]:
         questions = [
@@ -668,6 +1066,8 @@ class SquadStressBenchmark:
                 title=item.title,
             )
             for item in dataset.validation_questions
+            if item.track != StressTrack.HARD_DISTRACTOR
+            or item.id in hard_distractors
         ]
         original_paraphrase_ranks: dict[str, int | None] = {}
         records: list[StressEvaluationRecord] = []
@@ -787,6 +1187,7 @@ class SquadStressBenchmark:
             "benchmark": "SQuAD 2.0 controlled stress tracks",
             "cutoff": self.cutoff,
             "train_development_calibration": calibration_summary,
+            "stress_construction": stress_construction_summary or {},
             "held_out_validation_stress": metrics,
         }
         self._save(records, payload, confusion_rows)

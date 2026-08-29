@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import json
+import numpy as np
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from statistics import fmean
@@ -257,6 +258,71 @@ class CachedCrossEncoderReranker:
             self._cache[key] = self.reranker.rerank(query, candidates, top_k=None)
         ranked = self._cache[key]
         return ranked if top_k is None else ranked[:top_k]
+
+    def rerank_many(
+        self,
+        queries: Sequence[str],
+        candidate_lists: Sequence[Sequence[HybridResult]],
+        top_k: int | None = None,
+    ) -> list[list[RerankedResult]]:
+        """Batch uncached query/candidate pairs without changing ranking semantics."""
+
+        if len(queries) != len(candidate_lists):
+            raise ValueError("queries and candidate_lists must be aligned.")
+        if top_k is not None and top_k < 1:
+            raise ValueError("top_k must be at least 1 when provided.")
+        missing: list[tuple[tuple, str, Sequence[HybridResult]]] = []
+        flat_pairs: list[tuple[str, str]] = []
+        for query, candidates in zip(queries, candidate_lists):
+            if not query.strip():
+                raise ValueError("Queries must not be empty.")
+            if not candidates:
+                continue
+            key = self._key(query, candidates)
+            if key not in self._cache:
+                missing.append((key, query, candidates))
+                flat_pairs.extend((query, item.text) for item in candidates)
+
+        if flat_pairs:
+            scores = np.asarray(
+                self.reranker.model.predict(
+                    flat_pairs,
+                    batch_size=self.reranker.batch_size,
+                    show_progress_bar=False,
+                    convert_to_numpy=True,
+                )
+            ).reshape(-1)
+            if len(scores) != len(flat_pairs):
+                raise RuntimeError(
+                    "The cross-encoder returned an unexpected number of scores."
+                )
+            offset = 0
+            for key, _query, candidates in missing:
+                candidate_scores = scores[offset : offset + len(candidates)]
+                offset += len(candidates)
+                ranked = [
+                    RerankedResult(
+                        document=candidate.document,
+                        score=candidate.score,
+                        dense_rank=candidate.dense_rank,
+                        bm25_rank=candidate.bm25_rank,
+                        reranker_score=float(score),
+                    )
+                    for candidate, score in zip(candidates, candidate_scores)
+                ]
+                ranked.sort(
+                    key=lambda item: (-item.reranker_score, -item.rrf_score, item.id)
+                )
+                self._cache[key] = ranked
+
+        output: list[list[RerankedResult]] = []
+        for query, candidates in zip(queries, candidate_lists):
+            if not candidates:
+                output.append([])
+                continue
+            ranked = self._cache[self._key(query, candidates)]
+            output.append(ranked if top_k is None else ranked[:top_k])
+        return output
 
 
 def gold_document_rank(
