@@ -10,3 +10,8 @@ results/squad_detector_calibration.json
 results/squad_stress_metrics.json
 results/squad_stress_per_example.csv
 results/squad_failure_confusion.csv
+results/squad_generation_per_example.csv
+results/squad_generation_metrics.json
+results/squad_generation_summary.md
+results/squad_generation_cache.jsonl
+results/squad_nli_per_claim.csv
