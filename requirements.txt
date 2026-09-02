@@ -6,3 +6,5 @@ accelerate
 datasets
 rank-bm25
 langgraph
+fastapi
+uvicorn
