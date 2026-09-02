@@ -120,11 +120,12 @@ def _query_response(state: SelfHealingState) -> QueryResponse:
 
 
 def create_app(workflow_factory: WorkflowFactory = build_self_healing_workflow) -> FastAPI:
-    """Create an app whose workflow is initialized once during application startup."""
+    """Create an app that initializes and caches its workflow on the first query."""
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        app.state.workflow = workflow_factory()
+        app.state.workflow = None
+        app.state.workflow_factory = workflow_factory
         app.state.workflow_lock = Lock()
         yield
 
@@ -140,9 +141,11 @@ def create_app(workflow_factory: WorkflowFactory = build_self_healing_workflow) 
 
     @api.post("/query", response_model=QueryResponse)
     def query(payload: QueryRequest, request: Request) -> QueryResponse:
-        workflow: SelfHealingRAGWorkflow = request.app.state.workflow
-        workflow_lock: Lock = request.app.state.workflow_lock
-        with workflow_lock:
+        with request.app.state.workflow_lock:
+            workflow: SelfHealingRAGWorkflow | None = request.app.state.workflow
+            if workflow is None:
+                workflow = request.app.state.workflow_factory()
+                request.app.state.workflow = workflow
             state = workflow.run(payload.query)
         return _query_response(state)
 

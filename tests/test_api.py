@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import unittest
+from types import SimpleNamespace
 
 from pydantic import ValidationError
 
@@ -43,7 +44,7 @@ class ApiContractTests(unittest.TestCase):
         self.assertEqual(response.retry_count, 0)
         self.assertEqual(response.graph_path[-1], "GENERATE")
 
-    def test_routes_and_startup_factory_without_loading_models(self) -> None:
+    def test_health_is_lightweight_and_queries_reuse_lazy_workflow(self) -> None:
         workflow = FakeWorkflow()
         factory_calls = 0
 
@@ -53,16 +54,33 @@ class ApiContractTests(unittest.TestCase):
             return workflow
 
         api = create_app(factory)
-        routes = {(route.path, tuple(route.methods or ())) for route in api.routes}
-        self.assertTrue(any(path == "/health" and "GET" in methods for path, methods in routes))
-        self.assertTrue(any(path == "/query" and "POST" in methods for path, methods in routes))
+        routes = {route.path: route for route in api.routes}
+        self.assertIn("GET", routes["/health"].methods)
+        self.assertIn("POST", routes["/query"].methods)
 
         async def check_lifespan() -> None:
             async with api.router.lifespan_context(api):
+                self.assertIsNone(api.state.workflow)
+                self.assertEqual(factory_calls, 0)
+
+                health_response = routes["/health"].endpoint()
+                self.assertEqual(health_response.status, "ok")
+                self.assertEqual(factory_calls, 0)
+
+                request = SimpleNamespace(app=api)
+                first_response = routes["/query"].endpoint(
+                    QueryRequest(query="first question"), request
+                )
+                second_response = routes["/query"].endpoint(
+                    QueryRequest(query="second question"), request
+                )
+
+                self.assertEqual(first_response.answer, "Answer to: first question")
+                self.assertEqual(second_response.answer, "Answer to: second question")
                 self.assertIs(api.state.workflow, workflow)
+                self.assertEqual(factory_calls, 1)
 
         asyncio.run(check_lifespan())
-        self.assertEqual(factory_calls, 1)
 
 
 if __name__ == "__main__":
