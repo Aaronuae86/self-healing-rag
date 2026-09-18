@@ -1,0 +1,31 @@
+name: Model-free checks
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install model-free test dependencies
+        run: python -m pip install fastapi uvicorn numpy
+
+      - name: Compile Python sources
+        run: python -m compileall -q src tests
+
+      - name: Run model-free tests
+        run: python -m unittest discover -s tests -v
